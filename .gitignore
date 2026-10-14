@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+phishing_email*.csv
+.env

@@ -1,0 +1,16 @@
+{
+  "source": "synthetic demo data",
+  "train_size": 1120,
+  "test_size": 280,
+  "accuracy": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "confusion": {
+    "true_neg": 140,
+    "false_pos": 0,
+    "false_neg": 0,
+    "true_pos": 140
+  },
+  "trained_at": "2026-10-14 19:17 UTC"
+}
