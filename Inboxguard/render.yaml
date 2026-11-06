@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: inboxguard
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: TRUSTED_PROXIES   # Render puts exactly one proxy in front of the app
+        value: "1"
