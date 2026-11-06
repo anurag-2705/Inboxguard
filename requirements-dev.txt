@@ -1,1 +1,2 @@
-pytest>=8.0
+-r requirements-train.txt
+pytest==9.2.0
