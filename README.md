@@ -1,133 +1,93 @@
 # InboxGuard
 
-**Check before you click.** InboxGuard is a Flask web app that analyzes a pasted email or link and returns a phishing risk level (Safe / Warning / Critical), a confidence score, and a plain-English list of the reasons behind it.
+Paste an email or a link and get a risk level (**Low risk / Warning / Critical**) with the reasons behind it.
+You can also upload a `.eml` file. Links are analysed as text and never opened, and nothing you paste is stored or logged.
 
-![InboxGuard dashboard](docs/screenshot.png)
-<!-- Add a screenshot of the dashboard at docs/screenshot.png -->
+## How it scores
 
-## Features
-
-- **ML detection:** TF-IDF + Logistic Regression (scikit-learn) gives a phishing probability from the message text.
-- **Link and domain analysis:** flags look-alike domains (`paypa1-secure-login.xyz`), raw IP hosts, URL shorteners, suspicious TLDs, punycode, `@` tricks, excessive subdomains and plain HTTP.
-- **Email header analysis:** paste the raw headers to check SPF/DKIM/DMARC results, spoofed sender display names, and Reply-To / Return-Path mismatches.
-- **HTML link mismatch:** catches `<a href="evil.top">https://www.paypal.com</a>` style deception.
-- **Keyword detection:** urgency, credential requests, threats and reward/payment language.
-- **Explainable results:** every flag is listed with a severity and where it was found.
-- **Quick tests:** one-click Bank alert, Password reset, Package delivery, Spoofed headers and Normal email samples.
-- **Deployment-ready:** Dockerfile, Procfile, `render.yaml`, health check, rate limiting and security headers.
-
-## How it works
-
-```
- pasted text ──► split headers / body
-                    │
-      ┌─────────────┼───────────────┬──────────────────┐
-      ▼             ▼               ▼                  ▼
-  ML model     link & domain     keyword          header checks
- (0-100)         checks           checks         (only if headers
-                (rule score)    (rule score)         are pasted)
-      └─────────────┴───────┬───────┴──────────────────┘
-                            ▼
-        score = 0.6 × ML + 0.4 × rules   (rules weigh more for bare links)
-        rules ≥ 60 override the blend
-                            ▼
-        ≥ 65 Critical   |   35-64 Warning   |   < 35 Safe
-```
-
-## Quick start (Windows)
-
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python app.py            # http://127.0.0.1:5000
-```
-
-Or double-click `run_windows.bat`. For a production-style server on Windows use `python serve.py` (waitress). On Linux/macOS use `gunicorn app:app`.
-
-The first start trains a small **demo model on synthetic data**. For real results, train on a real dataset (next section).
-
-## Train on a real dataset
-
-1. Download **Phishing Email Detection** (Naser Abdullah Alam) from Kaggle and place the CSV in this folder, for example `phishing_email.csv`.
-2. Run `python train_model.py` (or `python train_model.py path\to\file.csv`).
-3. Review `metrics.json`. It is shown in the dashboard footer.
-
-The loader detects the text and label columns automatically, accepts labels such as `1/0`, `spam/ham` and `Phishing Email/Safe Email`, and removes duplicates and near-empty rows.
-
-| Metric | Value |
+| Signal | What it looks at |
 |---|---|
-| Dataset | _fill in after training_ |
-| Accuracy | _..._ |
-| Precision / Recall / F1 | _..._ |
+| **Message model** | TF-IDF + Logistic Regression, probability-calibrated, trained on real phishing and legitimate email |
+| **Links & domains** | look-alike and typosquatted brands (`paypa1`, `paypall`, `arnazon`), IP hosts, punycode, shorteners, suspicious TLDs, hidden redirect targets, link text that differs from the real destination, obfuscated links (`hxxp`, `[.]`) |
+| **Headers** (when present) | SPF/DKIM/DMARC results (topmost header only), brand name in the sender name vs. the real domain, free-mail impersonation, Reply-To / Return-Path mismatch |
+| **Attachments** (`.eml`) | executables, double extensions (`invoice.pdf.exe`), HTML/archive/macro files |
+| **Keywords** | urgency, credential requests, threats, rewards. Weak evidence: capped, can never produce a verdict alone |
 
-Do not commit the dataset itself (it is git-ignored). Commit `model.pkl` and `metrics.json` so deployments do not need it.
+`score = 0.5 * model + 0.5 * rules` (rules alone override the blend when they reach 60). Warning starts at 45, Critical at 65.
+The constants are at the top of `analyzer.py`. The model's word-level reasons are shown in the UI.
+
+## Honest evaluation
+
+Run `python evaluate.py` to reproduce. Numbers from the committed model:
+
+**Message model alone** (random 20% test split, 3,503 English emails; `metrics.json`)
+
+| Accuracy | Precision | Recall | F1 | ROC-AUC | False-positive rate |
+|---|---|---|---|---|---|
+| 98.7% | 97.7% | 96.7% | 97.2% | 0.999 | 0.7% |
+
+**Whole system** (ML + rules, 1,200 sampled test emails plus modern legitimate emails from unseen templates)
+
+| | Result |
+|---|---|
+| Phishing flagged Warning or Critical | 87.2% |
+| Phishing flagged Critical | 40.3% |
+| Enron legitimate mail flagged Warning / Critical | 0.2% / 0.0% |
+| Modern legitimate mail (unseen templates, n=77) flagged Warning / Critical | 10.4% / 0.0% |
+
+### Limitations: please read
+- **Training data is old.** The public legitimate-email corpora are about 20 years old (Enron). A first model trained on them flagged 69% of modern legitimate mail (bank alerts, receipts, newsletters) as phishing. Removing shortcuts (years, dataset tags, non-English text) and adding a small set of modern legitimate emails cut the model's own error on unseen modern templates to 32%. Rules, score thresholds and trusting official-domain links lower the system's false alarms further, but **Warning means "check this", not "this is phishing"**.
+- **The modern legitimate set is synthetic and small** (150 emails, 60 templates, from PhishLens, MIT). Treat that row as indicative only.
+- **About 60% of phishing is only a Warning**, not Critical. Phishing without links, or with clean links, relies on the model alone.
+- The random-split numbers are an upper bound. They do not cover new campaigns, AI-written phishing, QR-code phishing, or non-English mail (English only).
+- Pasted headers can be forged, so header results are only as trustworthy as the source.
+- This is a decision aid, not a guarantee. Do not act on a message just because it scored low.
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python app.py                      # http://127.0.0.1:5000
+```
+
+Windows one-click: `run_windows.bat` (uses waitress). Linux/cloud: `gunicorn app:app` (see `Procfile`).
+
+### Retrain
+```bash
+pip install -r requirements-train.txt
+python build_dataset.py --fetch    # clones public datasets into data/raw (phishing_pot is ~2.5 GB), writes data/emails.csv
+python train_model.py              # writes model.pkl + metrics.json
+python evaluate.py                 # end-to-end check; use it before changing weights/thresholds
+```
+`python train_model.py your.csv` trains on any CSV with text and label columns (for example the Kaggle phishing set).
+`--demo` makes a tiny synthetic smoke-test model; the app ignores a demo model and a test fails if one is committed.
+Check each dataset's licence before redistributing it.
+
+### Docker / Render
+```bash
+docker build -t inboxguard . && docker run -p 8000:8000 inboxguard
+```
+Behind a reverse proxy set `TRUSTED_PROXIES=1` (already set in `render.yaml`) so the rate limiter sees real client IPs.
+Leave it at `0` when clients connect directly.
 
 ## API
+- `POST /analyze` with JSON `{"text": "..."}` or multipart field `file` (`.eml`, max 1 MB). Text limit 20,000 characters. 30 requests/min per IP.
+- `GET /api/model-info`, `GET /health`
 
-`POST /analyze` with JSON `{"text": "<email or link>"}`.
-
-```json
-{
-  "score": 94, "level": "Critical", "ml_score": 98, "rule_score": 88,
-  "summary": "7 warning sign(s) found. The strongest: ...",
-  "indicators": [{"severity": "high", "text": "Impersonates 'paypal' ...", "where": "paypa1-secure-login.xyz"}],
-  "links": [{"url": "...", "domain": "...", "flags": []}],
-  "keywords": {"Urgency": ["urgent", "immediately"]},
-  "has_headers": false
-}
+## Project layout
+```
+app.py            Flask app: validation, rate limit, security headers
+analyzer.py       scoring engine (rules + model)
+preprocess.py     text cleaning shared by training and inference
+train_model.py    training, calibration, metrics
+build_dataset.py  builds data/emails.csv from public corpora
+evaluate.py       end-to-end evaluation / threshold tuning
+templates/        dashboard
+tests/            pytest suite (run: python -m pytest)
 ```
 
-Other routes: `GET /health`, `GET /api/model-info`. Input is limited to 20,000 characters and 30 requests per minute per IP (`RATE_LIMIT` environment variable).
-
-## Project structure
-
-```
-inboxguard/
-├── app.py              Flask routes, rate limit, security headers
-├── analyzer.py         ML + link + keyword + header analysis
-├── train_model.py      dataset loader, training, metrics
-├── serve.py            waitress server (Windows)
-├── templates/index.html  dashboard
-├── tests/              pytest suite
-├── Dockerfile · Procfile · render.yaml
-└── .github/workflows/ci.yml   runs the tests on every push
-```
-
-## Testing
-
-```powershell
-pip install -r requirements-dev.txt
-python -m pytest -q
-```
-
-## Deploy
-
-- **Render (free tier):** push to GitHub, then New Web Service. It reads `render.yaml` and uses `/health`.
-- **Docker:** `docker build -t inboxguard . && docker run -p 8000:8000 inboxguard`
-
-After deploying, check the dashboard footer: it must name your real dataset, not "synthetic demo data".
-
-## Limitations
-
-- Not a replacement for an enterprise email security gateway. It is an educational and analyst-assist tool.
-- Public phishing datasets are old and do not reflect modern AI-written or QR-code phishing.
-- Rules use a short brand list and a simplified registered-domain rule; production use should add `tldextract`.
-- No live threat intelligence yet (URLhaus, VirusTotal, WHOIS domain age).
-- Header checks rely on the `Authentication-Results` header written by your own mail provider.
-- The rate limiter is in-memory and per process.
-
-## Roadmap
-
-- [ ] Threat-intel lookups with SQLite caching
-- [ ] `.eml` file upload
-- [ ] Scan history and trend charts
-- [ ] Transformer model (DistilBERT) comparison
-
-## Privacy and safety
-
-Pasted emails may contain personal data. Request bodies are not logged or stored. Links are displayed as text and are never opened or fetched.
-
-## License
-
-MIT, see [LICENSE](LICENSE).
+## Security notes
+Per-request CSP with nonce, no inline user content (everything is rendered with `textContent`), bounded input sizes,
+non-root container, JSON error handlers, bounded rate-limiter memory, pinned dependencies.

@@ -1,6 +1,8 @@
-.venv/
 __pycache__/
 *.pyc
-data/
-phishing_email*.csv
+.venv/
+venv/
+.pytest_cache/
 .env
+# datasets are rebuilt with build_dataset.py; only model.pkl and metrics.json are committed
+data/
