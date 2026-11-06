@@ -1,11 +1,9 @@
 services:
   - type: web
     name: inboxguard
-    runtime: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 2 --timeout 60
     healthCheckPath: /health
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
+      - key: TRUSTED_PROXIES   # Render puts exactly one proxy in front of the app
+        value: "1"
