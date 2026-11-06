@@ -36,6 +36,7 @@ STRONG_RULES = 60        # rule score at or above this overrides the blend
 WARN_AT, CRITICAL_AT = 45, 65   # chosen with evaluate.py: Critical never flagged legitimate mail in testing
 KEYWORD_CAP = 15         # keywords are weak evidence: they can never create a verdict on their own
 MAX_LINKS = 40
+MAX_SCAN_CHARS = 50_000   # analyse at most this much text: bounds CPU time on huge or hostile input
 
 
 class Flag(NamedTuple):
@@ -102,9 +103,10 @@ SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "cutt
 BAD_TLDS = {"xyz", "top", "tk", "gq", "ml", "cf", "ga", "loan", "icu", "buzz", "click", "zip", "mov",
             "cyou", "rest", "monster", "sbs", "cfd"}
 WEAK_TLDS = {"info", "work", "support", "online", "site", "live", "shop", "store", "vip", "club"}
-BRAND_TLDS = {"com", "net", "org", "in", "co.in", "co.uk", "uk", "de", "fr", "ca", "com.au", "au", "co.jp",
-              "jp", "es", "it", "nl", "gov", "edu", "com.br", "br", "ae", "sg", "com.sg", "mx", "com.mx",
-              "ie", "se", "pl", "ch", "be"}
+# Country sites of a brand (amazon.in, google.co.uk). Generic TLDs (.com/.net/.org) are deliberately absent:
+# a brand's .com must be listed in OFFICIAL, otherwise "paypal.net" or "hdfc.net" would pass as official.
+BRAND_TLDS = {"in", "co.in", "co.uk", "uk", "de", "fr", "ca", "com.au", "au", "co.jp", "jp", "es", "it", "nl",
+              "com.br", "br", "ae", "sg", "com.sg", "mx", "com.mx", "ie", "se", "pl", "ch", "be"}
 SUSPICIOUS_WORDS = {"secure", "security", "login", "signin", "verify", "verification", "support", "help",
                     "account", "accounts", "update", "billing", "service", "services", "alert", "alerts",
                     "online", "bank", "banking", "confirm", "customer", "care", "wallet", "pay", "payment",
@@ -135,7 +137,7 @@ ROLE_RE = re.compile(r"\b(support|security|billing|helpdesk|help desk|customer (
 
 
 def is_official(brand, reg):
-    """True if `reg` (a registered domain) belongs to the brand: listed, or brand + a normal country TLD."""
+    """True if `reg` (a registered domain) belongs to the brand: explicitly listed, or brand + a country TLD."""
     if reg in OFFICIAL.get(brand, ()):
         return True
     label, _, suffix = reg.partition(".")
@@ -148,7 +150,8 @@ def _is_known_official(reg):
 
 def impersonated_brand(host, reg=None):
     """(brand, kind) if `host` imitates a brand it does not belong to, else None.
-    kind: lookalike (digit swaps like paypa1), typo (paypall), affix (paypal-secure), name (brand word in host)."""
+    kind: lookalike (digit swaps like paypa1), typo (paypall), affix (paypal-secure),
+          tldswap (the brand name on an unofficial TLD, e.g. paypal.net), name (brand word elsewhere in host)."""
     reg = reg or registered_domain(host)
     tokens = [t for t in re.split(r"[.\-_]", host) if t]
     for brand in OFFICIAL:
@@ -159,6 +162,8 @@ def impersonated_brand(host, reg=None):
             if n == brand:
                 if n != tok.lower():
                     return brand, "lookalike"
+                if reg.partition(".")[0] == brand:
+                    return brand, "tldswap"
                 in_subdomain = host != reg and brand not in reg.split(".")[0]
                 return brand, ("affix" if in_subdomain or any(t in SUSPICIOUS_WORDS for t in tokens) else "name")
             if len(brand) >= 5 and (n.startswith(brand) or n.endswith(brand)):
@@ -171,8 +176,9 @@ def impersonated_brand(host, reg=None):
 
 
 # ---- links ----------------------------------------------------------------------------------
-URL_RE = re.compile(r"""(?:https?://|www\.)[^\s<>"')\]]+""", re.I)
-BARE_RE = re.compile(r"""(?<![@\w./-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24})(/[^\s<>"')\]]*)?""", re.I)
+URL_RE = re.compile(r"""(?:https?://|www\.)(?:\[[0-9a-f:.]{2,45}\])?[^\s<>"')\]]*""", re.I)
+BARE_RE = re.compile(r"""(?<![@\w./-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z]{2,24})(/[^\s<>"')\]]*)?""", re.I)
+BARE_IP_RE = re.compile(r"""(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?/[^\s<>"')\]]*)""")
 ANCHOR_RE = re.compile(r"""<a\s[^>]{0,500}?href\s*=\s*["']([^"']{1,2000})["'][^>]{0,500}>(.{0,500}?)</a>""", re.I | re.S)
 REDIRECT_PARAMS = ("url", "u", "q", "redirect", "redirect_uri", "target", "dest", "destination", "link", "goto", "continue", "next", "r")
 
@@ -182,8 +188,32 @@ def deobfuscate(text):
     return re.sub(r"\[\s*\.\s*\]|\(\s*\.\s*\)|\[dot\]|\(dot\)", ".", text, flags=re.I)
 
 
+_NUMERIC_PART = re.compile(r"0x[0-9a-f]+|\d+", re.I)
+
+
+def is_ip_host(host):
+    """True for dotted IPv4, IPv6, and the obfuscated forms browsers still accept (0x7f000001, 3232235777, 0300.0250.1.1)."""
+    if not host:
+        return False
+    if IP_RE.match(host) or ":" in host:
+        return True
+    if re.fullmatch(r"0x[0-9a-f]{1,8}|\d{8,10}", host, re.I):
+        return True
+    parts = host.split(".")
+    return 1 < len(parts) <= 4 and all(_NUMERIC_PART.fullmatch(p) for p in parts)
+
+
+def _urlparse(url):
+    """urlparse that never raises: malformed input (stray '[' or ']') must not crash the whole analysis."""
+    u = url if "://" in url else "http://" + url
+    try:
+        return urlparse(u)
+    except ValueError:
+        return urlparse(u.replace("[", "").replace("]", ""))
+
+
 def _host(url):
-    parsed = urlparse(url if "://" in url else "http://" + url)
+    parsed = _urlparse(url)
     try:
         return (parsed.hostname or "").lower()
     except ValueError:
@@ -202,16 +232,17 @@ def extract_links(text):
             continue
         if path or r.suffix in BAD_TLDS or impersonated_brand(domain):
             urls.append(domain + path)
+    urls += BARE_IP_RE.findall(rest)
     return list(dict.fromkeys(urls))[:MAX_LINKS]
 
 
 def check_url(raw, _depth=0):
     url = raw.rstrip(".,;)")
-    parsed = urlparse(url if "://" in url else "http://" + url)
+    parsed = _urlparse(url)
     host = _host(url)
     reg = registered_domain(host)
     flags = []
-    is_ip = bool(IP_RE.match(host))
+    is_ip = is_ip_host(host)
     if is_ip:
         flags.append(Flag("Uses a raw IP address instead of a domain name", "high", 30))
     if "xn--" in host:
@@ -230,11 +261,14 @@ def check_url(raw, _depth=0):
         brand, kind = hit
         if kind == "name":
             flags.append(Flag(f"Uses the name '{brand}' but the real domain is {reg}", "medium", 20))
+        elif kind == "tldswap":
+            flags.append(Flag(f"Uses the brand name '{brand}' on an unofficial domain ({reg})", "high", 30))
         else:
             flags.append(Flag(f"Impersonates '{brand}' but the real domain is {reg}", "high", 35))
     if parsed.scheme == "http":
         flags.append(Flag("Not encrypted (HTTP, not HTTPS)", "low", 8))
-    if host.count(".") >= 3 and not is_ip:
+    sub = _TLD(host).subdomain if not is_ip else ""
+    if sub.count(".") >= 1:                       # two or more subdomain labels; the public suffix (co.uk) is not counted
         flags.append(Flag("Excessive subdomains", "medium", 10))
     if host.count("-") >= 2:
         flags.append(Flag("Many hyphens in domain", "medium", 10))
@@ -419,6 +453,7 @@ def combine(ml, heur, words):
 
 def _build(msg, plain, html_part, attachments=()):
     subject = _hdr(msg, "Subject") if msg is not None else ""
+    plain, html_part = plain[:MAX_SCAN_CHARS], html_part[:MAX_SCAN_CHARS]
     raw = (plain + "\n" + html_part).strip()
     text = clean_text(plain or html_part)
     content = (subject + "\n" + text).strip() or clean_text(raw)
@@ -455,6 +490,8 @@ def _build(msg, plain, html_part, attachments=()):
     if ml is not None and heur < 15 and links and all(_is_known_official(registered_domain(l["domain"])) for l in links):
         ml *= 0.5
     score = round(min(combine(ml, heur, len(content.split())), 100))
+    if any(i["severity"] == "high" for i in indicators):     # a confirmed look-alike or failed SPF must never read "Low risk"
+        score = max(score, WARN_AT)
     level = level_for(score)
     indicators.sort(key=lambda i: {"high": 0, "medium": 1, "low": 2}[i["severity"]])
     if level == "Low risk":

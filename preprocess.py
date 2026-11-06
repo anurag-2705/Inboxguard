@@ -11,7 +11,9 @@ MAX_CHARS = 6000
 _SCRIPT_STYLE = re.compile(r"<(script|style|head)\b.*?</\1\s*>", re.I | re.S)
 _TAG = re.compile(r"<[^>]+>")
 _URL = re.compile(r"(?:https?://|www\.)[^\s<>\"')\]]+", re.I)
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Anchored at a token boundary and length-bounded: the unanchored form rescans the whole run from every start
+# position (quadratic on input like "a.b.a.b..." with no "@"), which let a 1 MB upload pin a worker for minutes.
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){1,8}")
 _LONG_TOKEN = re.compile(r"\S{40,}")          # base64 blobs, tracking ids
 _SPACE = re.compile(r"[ \t\r\f\v]+")
 _BLANKS = re.compile(r"\n\s*\n+")

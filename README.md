@@ -14,6 +14,7 @@ You can also upload a `.eml` file. Links are analysed as text and never opened, 
 | **Keywords** | urgency, credential requests, threats, rewards. Weak evidence: capped, can never produce a verdict alone |
 
 `score = 0.5 * model + 0.5 * rules` (rules alone override the blend when they reach 60). Warning starts at 45, Critical at 65.
+Any single **high-severity** finding (look-alike or TLD-swapped brand domain, raw/obfuscated IP host, failed SPF/DKIM/DMARC, spoofed sender, executable attachment) raises the result to at least **Warning**, so a confirmed red flag never reads "Low risk".
 The constants are at the top of `analyzer.py`. The model's word-level reasons are shown in the UI.
 
 ## Honest evaluation
@@ -42,6 +43,15 @@ Run `python evaluate.py` to reproduce. Numbers from the committed model:
 - The random-split numbers are an upper bound. They do not cover new campaigns, AI-written phishing, QR-code phishing, or non-English mail (English only).
 - Pasted headers can be forged, so header results are only as trustworthy as the source.
 - This is a decision aid, not a guarantee. Do not act on a message just because it scored low.
+
+## Tests and CI
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest            # ~80 tests: domains, IPs, headers, attachments, scoring, HTTP API, hostile-input timing
+```
+GitHub Actions (`.github/workflows/ci.yml`) runs the suite and a Docker build + smoke test on every push.
+After changing rules or thresholds, re-run `python evaluate.py` and update the numbers above.
 
 ## Setup
 
@@ -89,5 +99,8 @@ tests/            pytest suite (run: python -m pytest)
 ```
 
 ## Security notes
+Input is bounded everywhere: pasted text 20,000 chars, uploads 1 MB, and at most 50,000 characters of any message are scanned.
+Regexes that touch untrusted text are length-bounded and anchored (a 1 MB upload of `a.b.a.b.…` once took minutes; it now takes about 0.1 s, and a test guards this).
+Malformed URLs (stray `[`/`]`) cannot crash the analysis.
 Per-request CSP with nonce, no inline user content (everything is rendered with `textContent`), bounded input sizes,
 non-root container, JSON error handlers, bounded rate-limiter memory, pinned dependencies.
